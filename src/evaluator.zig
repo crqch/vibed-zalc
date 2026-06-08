@@ -11,19 +11,22 @@ pub const EvalError = error{
     InvalidNumberFormat,
 };
 
+pub const DisplayFormat = enum { decimal, hex, octal, binary };
+
 pub const ParseError = EvalError || std.mem.Allocator.Error;
 
 pub fn evaluate(
     allocator: std.mem.Allocator,
     expr: []const u8,
     ctx: *context_mod.Context,
-) !f64 {
+    format: *DisplayFormat,
+) anyerror!f64 {
     var tokens = try parser.tokenize(allocator, expr);
     defer tokens.deinit(allocator);
 
     var pos: usize = 0;
 
-    const result = try parseExpression(&tokens, &pos, ctx, allocator);
+    const result = try parseExpression(&tokens, &pos, ctx, allocator, format);
     return result;
 }
 
@@ -32,20 +35,21 @@ fn parseExpression(
     pos: *usize,
     ctx: *context_mod.Context,
     allocator: std.mem.Allocator,
+    format: *DisplayFormat,
 ) anyerror!f64 {
-    var left = try parseTerm(tokens, pos, ctx, allocator);
+    var left = try parseTerm(tokens, pos, ctx, allocator, format);
 
     while (pos.* < tokens.items.len) {
         const token = tokens.items[pos.*];
         switch (token.type) {
             .plus => {
                 pos.* += 1;
-                const right = try parseTerm(tokens, pos, ctx, allocator);
+                const right = try parseTerm(tokens, pos, ctx, allocator, format);
                 left = left + right;
             },
             .minus => {
                 pos.* += 1;
-                const right = try parseTerm(tokens, pos, ctx, allocator);
+                const right = try parseTerm(tokens, pos, ctx, allocator, format);
                 left = left - right;
             },
             else => break,
@@ -60,26 +64,27 @@ fn parseTerm(
     pos: *usize,
     ctx: *context_mod.Context,
     allocator: std.mem.Allocator,
+    format: *DisplayFormat,
 ) anyerror!f64 {
-    var left = try parseFactor(tokens, pos, ctx, allocator);
+    var left = try parseFactor(tokens, pos, ctx, allocator, format);
 
     while (pos.* < tokens.items.len) {
         const token = tokens.items[pos.*];
         switch (token.type) {
             .multiply => {
                 pos.* += 1;
-                const right = try parseFactor(tokens, pos, ctx, allocator);
+                const right = try parseFactor(tokens, pos, ctx, allocator, format);
                 left = left * right;
             },
             .divide => {
                 pos.* += 1;
-                const right = try parseFactor(tokens, pos, ctx, allocator);
+                const right = try parseFactor(tokens, pos, ctx, allocator, format);
                 if (right == 0) return EvalError.DivisionByZero;
                 left = left / right;
             },
             .modulo => {
                 pos.* += 1;
-                const right = try parseFactor(tokens, pos, ctx, allocator);
+                const right = try parseFactor(tokens, pos, ctx, allocator, format);
                 left = @mod(left, right);
             },
             else => break,
@@ -94,8 +99,9 @@ fn parseFactor(
     pos: *usize,
     ctx: *context_mod.Context,
     allocator: std.mem.Allocator,
+    format: *DisplayFormat,
 ) anyerror!f64 {
-    const left = try parsePower(tokens, pos, ctx, allocator);
+    const left = try parsePower(tokens, pos, ctx, allocator, format);
     return left;
 }
 
@@ -104,12 +110,13 @@ fn parsePower(
     pos: *usize,
     ctx: *context_mod.Context,
     allocator: std.mem.Allocator,
+    format: *DisplayFormat,
 ) anyerror!f64 {
-    var left = try parsePrimary(tokens, pos, ctx, allocator);
+    var left = try parsePrimary(tokens, pos, ctx, allocator, format);
 
     while (pos.* < tokens.items.len and tokens.items[pos.*].type == .power) {
         pos.* += 1;
-        const right = try parsePrimary(tokens, pos, ctx, allocator);
+        const right = try parsePrimary(tokens, pos, ctx, allocator, format);
         left = math_lib.pow(left, right);
     }
 
@@ -121,6 +128,7 @@ fn parsePrimary(
     pos: *usize,
     ctx: *context_mod.Context,
     allocator: std.mem.Allocator,
+    format: *DisplayFormat,
 ) anyerror!f64 {
     if (pos.* >= tokens.items.len) return EvalError.InvalidExpression;
 
@@ -138,18 +146,18 @@ fn parsePrimary(
             // Check for function calls
             if (pos.* < tokens.items.len and tokens.items[pos.*].type == .lparen) {
                 pos.* += 1;
-                const arg = try parseExpression(tokens, pos, ctx, allocator);
+                const arg = try parseExpression(tokens, pos, ctx, allocator, format);
                 if (pos.* < tokens.items.len and tokens.items[pos.*].type == .rparen) {
                     pos.* += 1;
                 }
 
-                return try callMathFunction(name, arg);
+                return try callMathFunction(name, arg, format);
             }
 
             // Check for variable assignment
             if (pos.* < tokens.items.len and tokens.items[pos.*].type == .equals) {
                 pos.* += 1;
-                const value = try parseExpression(tokens, pos, ctx, allocator);
+                const value = try parseExpression(tokens, pos, ctx, allocator, format);
                 try ctx.setVariable(name, value);
                 return value;
             }
@@ -163,7 +171,7 @@ fn parsePrimary(
         },
         .lparen => {
             pos.* += 1;
-            const result = try parseExpression(tokens, pos, ctx, allocator);
+            const result = try parseExpression(tokens, pos, ctx, allocator, format);
             if (pos.* < tokens.items.len and tokens.items[pos.*].type == .rparen) {
                 pos.* += 1;
             }
@@ -171,17 +179,28 @@ fn parsePrimary(
         },
         .minus => {
             pos.* += 1;
-            return -(try parsePrimary(tokens, pos, ctx, allocator));
+            return -(try parsePrimary(tokens, pos, ctx, allocator, format));
         },
         .plus => {
             pos.* += 1;
-            return try parsePrimary(tokens, pos, ctx, allocator);
+            return try parsePrimary(tokens, pos, ctx, allocator, format);
         },
         else => return EvalError.InvalidExpression,
     }
 }
 
-fn callMathFunction(name: []const u8, arg: f64) !f64 {
+fn callMathFunction(name: []const u8, arg: f64, format: *DisplayFormat) !f64 {
+    if (std.mem.eql(u8, name, "hex")) {
+        format.* = .hex;
+        return arg;
+    } else if (std.mem.eql(u8, name, "oct")) {
+        format.* = .octal;
+        return arg;
+    } else if (std.mem.eql(u8, name, "bin")) {
+        format.* = .binary;
+        return arg;
+    }
+
     return if (std.mem.eql(u8, name, "sin"))
         math_lib.sin(arg)
     else if (std.mem.eql(u8, name, "cos"))
