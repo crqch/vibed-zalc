@@ -41,8 +41,22 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) !std.ArrayList(
 
         if (std.ascii.isDigit(char)) {
             const start = i;
-            while (i < input.len and (std.ascii.isDigit(input[i]) or input[i] == '.')) {
-                i += 1;
+            if (char == '0' and i + 1 < input.len) {
+                const next = input[i + 1];
+                if (next == 'x' or next == 'X') {
+                    i += 2;
+                    while (i < input.len and std.ascii.isHex(input[i])) i += 1;
+                } else if (next == 'o' or next == 'O') {
+                    i += 2;
+                    while (i < input.len and input[i] >= '0' and input[i] <= '7') i += 1;
+                } else if (next == 'b' or next == 'B') {
+                    i += 2;
+                    while (i < input.len and (input[i] == '0' or input[i] == '1')) i += 1;
+                } else {
+                    while (i < input.len and (std.ascii.isDigit(input[i]) or input[i] == '.')) i += 1;
+                }
+            } else {
+                while (i < input.len and (std.ascii.isDigit(input[i]) or input[i] == '.')) i += 1;
             }
             try tokens.append(allocator, .{
                 .type = .number,
